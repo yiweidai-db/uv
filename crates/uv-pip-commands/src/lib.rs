@@ -1,6 +1,8 @@
 //! Commands for inspecting and modifying Python environments.
 
 use uv_configuration::HashCheckingMode;
+use uv_installer::SitePackagesDiscovery;
+use uv_preview::PreviewFeature;
 
 pub use pylock::PylockResolutionError;
 
@@ -17,6 +19,16 @@ pub mod uninstall;
 mod install_report;
 mod pylock;
 mod reporters;
+
+/// Only `uv pip` commands discover packages along `sys.path`; project, tool, and build environments
+/// own all of their packages.
+fn site_packages_discovery() -> SitePackagesDiscovery {
+    if uv_preview::is_enabled(PreviewFeature::SysPathDiscovery) {
+        SitePackagesDiscovery::SysPath
+    } else {
+        SitePackagesDiscovery::Scheme
+    }
+}
 
 /// Require build hashes independently of runtime checking. Otherwise, verify supplied build
 /// hashes only when runtime checking is enabled.

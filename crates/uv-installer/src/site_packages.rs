@@ -6,6 +6,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use fs_err as fs;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use same_file::is_same_file;
+use tracing::debug;
 
 use uv_configuration::{
     DependencyMode, DependencyModifierScope, DependencyModifiers, ExcludeDependency, Excludes,
@@ -46,6 +48,21 @@ pub struct SitePackages {
     by_name: FxHashMap<PackageName, Vec<usize>>,
     /// The installed editable distributions, keyed by URL.
     by_url: FxHashMap<SafeUrl, Vec<usize>>,
+    /// Distributions outside the environment's `site-packages`, which uv never uninstalls.
+    read_only: FxHashSet<usize>,
+    /// Packages with a read-only copy ahead of the environment on `sys.path`, which a copy
+    /// installed into the environment would not shadow.
+    unshadowable: FxHashMap<PackageName, PathBuf>,
+}
+
+/// Where [`SitePackages`] looks for installed distributions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SitePackagesDiscovery {
+    /// The environment's `site-packages` directories.
+    Scheme,
+    /// Every directory on the interpreter's runtime `sys.path`, where directories outside the
+    /// environment's `site-packages` are read-only.
+    SysPath,
 }
 
 impl SitePackages {
@@ -54,42 +71,72 @@ impl SitePackages {
         Self::from_interpreter(environment.interpreter())
     }
 
+    /// Build an index of installed packages from the given Python environment and discovery mode.
+    pub fn from_environment_with_discovery(
+        environment: &PythonEnvironment,
+        discovery: SitePackagesDiscovery,
+    ) -> Result<Self> {
+        Self::from_interpreter_with_filter(environment.interpreter(), None, discovery)
+    }
+
     /// Build an index of the requested installed packages from the given Python environment.
     pub fn from_environment_for_packages<'a>(
         environment: &PythonEnvironment,
         package_names: impl IntoIterator<Item = &'a PackageName>,
+        discovery: SitePackagesDiscovery,
     ) -> Result<Self> {
         let package_names = package_names.into_iter().collect::<FxHashSet<_>>();
-        Self::from_interpreter_with_filter(environment.interpreter(), Some(&package_names))
+        Self::from_interpreter_with_filter(
+            environment.interpreter(),
+            Some(&package_names),
+            discovery,
+        )
     }
 
     /// Build an index of installed packages from the given Python executable.
     pub fn from_interpreter(interpreter: &Interpreter) -> Result<Self> {
-        Self::from_interpreter_with_filter(interpreter, None)
+        Self::from_interpreter_with_filter(interpreter, None, SitePackagesDiscovery::Scheme)
     }
 
     /// Build an index of installed packages from the given Python executable.
     fn from_interpreter_with_filter(
         interpreter: &Interpreter,
         package_names: Option<&FxHashSet<&PackageName>>,
+        discovery: SitePackagesDiscovery,
     ) -> Result<Self> {
         let mut distributions: Vec<Option<InstalledDist>> = Vec::new();
         let mut by_name: FxHashMap<PackageName, Vec<usize>> = FxHashMap::default();
         let mut by_url: FxHashMap<SafeUrl, Vec<usize>> = FxHashMap::default();
+        let mut read_only = FxHashSet::default();
+        let mut unshadowable = FxHashMap::default();
+        // The first directory that provides each package, and whether it is read-only.
+        let mut providers: FxHashMap<PackageName, (usize, bool)> = FxHashMap::default();
 
-        for site_packages in interpreter.site_packages() {
+        for (root_index, root) in site_packages_roots(interpreter, discovery)?
+            .into_iter()
+            .enumerate()
+        {
             // Read the site-packages directory.
-            let site_packages = match fs::read_dir(site_packages.as_ref()) {
+            let site_packages = match fs::read_dir(root.path.as_ref()) {
                 Ok(read_dir) => sorted_dist_like_paths(read_dir).with_context(|| {
                     format!(
                         "Failed to read site-packages directory contents: {}",
-                        site_packages.user_display()
+                        root.path.user_display()
                     )
-                })?,
+                }),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     continue;
                 }
-                Err(err) => return Err(err).context("Failed to read site-packages directory"),
+                Err(err) => Err(err).context("Failed to read site-packages directory"),
+            };
+            let site_packages = match site_packages {
+                Ok(site_packages) => site_packages,
+                // `sys.path` can include zip files and directories that uv cannot read.
+                Err(err) if !root.mutable => {
+                    debug!("Skipping `{}`: {err}", root.path.user_display());
+                    continue;
+                }
+                Err(err) => return Err(err),
             };
 
             // Index all installed packages by name.
@@ -115,6 +162,13 @@ impl SitePackages {
                         );
                         continue;
                     }
+                    Err(_) if !root.mutable => {
+                        warn_user!(
+                            "Ignoring invalid distribution: {}",
+                            path.simplified_display().cyan()
+                        );
+                        continue;
+                    }
                     Err(err) => {
                         return Err(err).context(format!(
                             "Failed to read metadata from: {}",
@@ -129,7 +183,29 @@ impl SitePackages {
                     continue;
                 }
 
+                if root.precedes_environment {
+                    unshadowable
+                        .entry(dist_info.name().clone())
+                        .or_insert_with(|| path.clone());
+                }
+
+                // Python imports the first copy on `sys.path`, so skip read-only copies behind an
+                // earlier directory and environment copies behind a read-only one. Copies across the
+                // environment's own directories stay visible as duplicates.
+                if let Some(&(provider, provider_read_only)) = providers.get(dist_info.name())
+                    && provider != root_index
+                    && (provider_read_only || !root.mutable)
+                {
+                    continue;
+                }
+                providers
+                    .entry(dist_info.name().clone())
+                    .or_insert((root_index, !root.mutable));
+
                 let idx = distributions.len();
+                if !root.mutable {
+                    read_only.insert(idx);
+                }
 
                 // Index the distribution by name.
                 by_name
@@ -152,6 +228,8 @@ impl SitePackages {
             distributions,
             by_name,
             by_url,
+            read_only,
+            unshadowable,
         })
     }
 
@@ -177,14 +255,36 @@ impl SitePackages {
     }
 
     /// Remove the given packages from the index, returning all installed versions, if any.
+    ///
+    /// Read-only distributions stay in the index, since uv never uninstalls them.
     pub(crate) fn remove_packages(&mut self, name: &PackageName) -> Vec<InstalledDist> {
         let Some(indexes) = self.by_name.get(name) else {
             return Vec::new();
         };
         indexes
             .iter()
+            .filter(|index| !self.read_only.contains(index))
             .filter_map(|index| std::mem::take(&mut self.distributions[*index]))
             .collect()
+    }
+
+    /// Returns a read-only copy of the package that precedes the environment on `sys.path`.
+    pub(crate) fn unshadowable(&self, name: &PackageName) -> Option<&Path> {
+        self.unshadowable.get(name).map(PathBuf::as_path)
+    }
+
+    /// Returns the remaining distributions that uv may uninstall.
+    pub(crate) fn into_mutable(self) -> impl Iterator<Item = InstalledDist> {
+        let Self {
+            distributions,
+            read_only,
+            ..
+        } = self;
+        distributions
+            .into_iter()
+            .enumerate()
+            .filter(move |(index, _)| !read_only.contains(index))
+            .filter_map(|(_, dist)| dist)
     }
 
     /// Returns the distributions installed from the given URL, if any.
@@ -676,6 +776,68 @@ impl IntoIterator for SitePackages {
     fn into_iter(self) -> Self::IntoIter {
         self.distributions.into_iter().flatten()
     }
+}
+
+/// A directory to scan for installed distributions.
+struct Root<'a> {
+    path: Cow<'a, Path>,
+    /// Whether the directory is one of the environment's `site-packages`, which uv may modify.
+    mutable: bool,
+    /// Whether a read-only directory comes before the environment on `sys.path`, so its packages
+    /// take precedence over copies installed into the environment.
+    precedes_environment: bool,
+}
+
+/// Returns the directories to scan, in import order.
+fn site_packages_roots(
+    interpreter: &Interpreter,
+    discovery: SitePackagesDiscovery,
+) -> Result<Vec<Root<'_>>> {
+    let environment = interpreter.site_packages().collect::<Vec<_>>();
+    let sys_path = match discovery {
+        SitePackagesDiscovery::Scheme => None,
+        SitePackagesDiscovery::SysPath => interpreter.runtime_sys_path()?,
+    };
+    let Some(sys_path) = sys_path else {
+        return Ok(environment
+            .into_iter()
+            .map(|path| Root {
+                path,
+                mutable: true,
+                precedes_environment: false,
+            })
+            .collect());
+    };
+
+    let same = |a: &Path, b: &Path| a == b || is_same_file(a, b).unwrap_or(false);
+    let mut roots: Vec<Root> = Vec::new();
+    for path in sys_path {
+        if roots.iter().any(|root| same(&root.path, &path)) {
+            continue;
+        }
+        let mutable = environment.iter().any(|root| same(root, &path));
+        roots.push(Root {
+            path: Cow::Owned(path),
+            mutable,
+            precedes_environment: false,
+        });
+    }
+    if let Some(last) = roots.iter().rposition(|root| root.mutable) {
+        for root in &mut roots[..last] {
+            root.precedes_environment = !root.mutable;
+        }
+    }
+    // Scan environment directories missing from `sys.path` too, so uv still sees what it owns.
+    for path in environment {
+        if !roots.iter().any(|root| same(&root.path, &path)) {
+            roots.push(Root {
+                path,
+                mutable: true,
+                precedes_environment: false,
+            });
+        }
+    }
+    Ok(roots)
 }
 
 fn sorted_dist_like_paths(read_dir: fs::ReadDir) -> Result<Vec<PathBuf>, std::io::Error> {

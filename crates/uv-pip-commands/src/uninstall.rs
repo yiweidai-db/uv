@@ -11,6 +11,7 @@ use uv_configuration::{DryRun, KeyringProviderType};
 use uv_distribution_types::Requirement;
 use uv_distribution_types::{InstalledMetadata, Name, UnresolvedRequirement};
 use uv_fs::Simplified;
+use uv_installer::{SitePackages, SitePackagesDiscovery};
 use uv_pep508::UnnamedRequirement;
 use uv_pypi_types::VerbatimParsedUrl;
 use uv_python_discovery::find_environment;
@@ -20,6 +21,7 @@ use uv_python_types::{
 use uv_requirements::{RequirementsSource, RequirementsSpecification};
 
 use crate::reporters::report_target_environment;
+use crate::site_packages_discovery;
 use uv_command_support::Printer;
 use uv_command_support::{ExitStatus, elapsed};
 
@@ -105,7 +107,16 @@ pub async fn pip_uninstall(
         .ok();
 
     // Index the current `site-packages` directory.
-    let site_packages = uv_installer::SitePackages::from_environment(&environment)?;
+    let site_packages = SitePackages::from_environment(&environment)?;
+
+    // Packages found only on `sys.path` are read-only, so they are reported but never removed.
+    let runtime_packages = match site_packages_discovery() {
+        SitePackagesDiscovery::Scheme => None,
+        SitePackagesDiscovery::SysPath => Some(SitePackages::from_environment_with_discovery(
+            &environment,
+            SitePackagesDiscovery::SysPath,
+        )?),
+    };
 
     // Partition the requirements into named and unnamed requirements.
     let (named, unnamed): (Vec<Requirement>, Vec<UnnamedRequirement<VerbatimParsedUrl>>) = spec
@@ -147,7 +158,22 @@ pub async fn pip_uninstall(
         for package in &names {
             let installed = site_packages.get_packages(package);
             if installed.is_empty() {
-                if !dry_run.enabled() {
+                if dry_run.enabled() {
+                    continue;
+                }
+                if let Some(read_only) = runtime_packages
+                    .as_ref()
+                    .and_then(|packages| packages.get_packages(package).into_iter().next())
+                {
+                    writeln!(
+                        printer.stderr(),
+                        "{}{} Skipping {} as it is installed in a read-only location: {}",
+                        "warning".yellow().bold(),
+                        ":".bold(),
+                        package.as_ref().bold(),
+                        read_only.install_path().simplified_display().cyan()
+                    )?;
+                } else {
                     writeln!(
                         printer.stderr(),
                         "{}{} Skipping {} as it is not installed",

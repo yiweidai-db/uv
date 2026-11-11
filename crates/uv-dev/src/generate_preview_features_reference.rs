@@ -393,6 +393,14 @@ mod tests {
         environments. The name alone does not cause uv to treat a user-created environment as the
         base Conda installation.
 
+        ### `sys-path-discovery` {#sys-path-discovery}
+
+        `uv pip` commands discover installed packages on the interpreter's runtime `sys.path`,
+        including directories added by `.pth` files and `PYTHONPATH`. Packages outside the
+        environment's `site-packages` are read-only: they can satisfy requirements and are shadowed
+        when a different version is installed, but are never uninstalled. `uv pip sync` does not use
+        this discovery yet.
+
         ### `target-workspace-discovery` {#target-workspace-discovery}
 
         For a local `uv run` target, uv starts project and workspace discovery from the directory

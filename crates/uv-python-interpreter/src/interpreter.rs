@@ -446,6 +446,57 @@ impl Interpreter {
         &self.site_packages
     }
 
+    /// Return the `sys.path` of a fresh interpreter process, or `None` with `--target` or
+    /// `--prefix`, which own their packages exclusively.
+    ///
+    /// Unlike the interpreter query, this runs without `-I` so that `.pth` files, `sitecustomize`,
+    /// `PYTHONPATH`, and user site-packages apply as they do at runtime. It is never cached, since
+    /// those inputs change without touching the executable.
+    pub fn runtime_sys_path(&self) -> Result<Option<Vec<PathBuf>>, Error> {
+        if self.target.is_some() || self.prefix.is_some() {
+            return Ok(None);
+        }
+
+        // `-c` puts the working directory first on `sys.path`; drop it before importing `json` so
+        // that a local `json.py` cannot run. The marker skips any output from `.pth` files.
+        let output = Command::new(&self.sys_executable)
+            .arg("-B")
+            .arg("-c")
+            .arg(
+                r#"import sys; sys.path[:] = [p for p in sys.path if isinstance(p, str) and p]; import json; print("__UV_SYS_PATH__" + json.dumps(sys.path))"#,
+            )
+            .output()
+            .map_err(|err| Error::SpawnFailed {
+                path: self.sys_executable.clone(),
+                err,
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            return Err(Error::StatusCode(StatusCodeError {
+                code: output.status,
+                stdout: stdout.trim().to_string(),
+                stderr,
+                path: self.sys_executable.clone(),
+            }));
+        }
+
+        let response = stdout
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("__UV_SYS_PATH__"))
+            .unwrap_or_default();
+        serde_json::from_str(response).map(Some).map_err(|err| {
+            Error::UnexpectedResponse(UnexpectedResponseError {
+                err,
+                stdout: stdout.trim().to_string(),
+                stderr,
+                path: self.sys_executable.clone(),
+            })
+        })
+    }
+
     /// Return the `stdlib` path for this Python interpreter, as returned by `sysconfig.get_paths()`.
     pub fn stdlib(&self) -> &Path {
         &self.stdlib

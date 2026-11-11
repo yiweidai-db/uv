@@ -27,6 +27,7 @@ use uv_python_types::{EnvironmentPreference, PythonArchitecture, PythonPreferenc
 use uv_resolver::{ExcludeNewer, Prerelease};
 
 use crate::reporters::report_target_environment;
+use crate::site_packages_discovery;
 use uv_command_support::ExitStatus;
 use uv_command_support::Printer;
 use uv_resolve_operations::latest::LatestClient;
@@ -69,7 +70,8 @@ pub async fn pip_tree(
     report_target_environment(&environment, cache, printer)?;
 
     // Read packages from the virtual environment.
-    let site_packages = SitePackages::from_environment(&environment)?;
+    let site_packages =
+        SitePackages::from_environment_with_discovery(&environment, site_packages_discovery())?;
 
     let packages = {
         let mut packages: FxHashMap<_, Vec<_>> = FxHashMap::default();

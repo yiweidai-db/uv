@@ -177,6 +177,18 @@ circumstances.
 For more, see
 ["Using arbitrary Python environments"](./environments.md#using-arbitrary-python-environments).
 
+## Packages outside the environment
+
+pip considers every package on the interpreter's `sys.path`, including system site packages and
+directories added by `.pth` files or `PYTHONPATH`. uv only considers packages in the environment's
+own `site-packages`, so `uv pip list` can omit packages that Python imports, and `uv pip install`
+can install them again.
+
+With the `sys-path-discovery` [preview feature](../concepts/preview.md), `uv pip` commands other
+than `uv pip sync` discover packages along `sys.path`. Packages outside the environment are
+read-only: they satisfy requirements, a different version installed into the environment shadows
+them, and uv never uninstalls them.
+
 ## Resolution strategy
 
 For a given set of dependency specifiers, it's often the case that there is no single "correct" set

@@ -50,7 +50,7 @@ use uv_workspace::pyproject::ExtraBuildDependencies;
 use crate::install_report::write_install_report;
 use crate::pylock::{read_pylock_toml, resolve_pylock_toml};
 use crate::reporters::report_target_environment;
-use crate::resolve_build_hash_checking;
+use crate::{resolve_build_hash_checking, site_packages_discovery};
 use uv_command_support::{ExitStatus, Printer, UvError};
 use uv_install_operations::Changelog;
 use uv_install_operations::editable::apply_editable_mode;
@@ -328,7 +328,10 @@ pub async fn pip_install(
     let site_packages = if defer_site_packages {
         None
     } else {
-        Some(SitePackages::from_environment(&environment)?)
+        Some(SitePackages::from_environment_with_discovery(
+            &environment,
+            site_packages_discovery(),
+        )?)
     };
 
     // Check if the current environment satisfies the requirements.
@@ -610,6 +613,7 @@ pub async fn pip_install(
         None => SitePackages::from_environment_for_packages(
             &environment,
             resolution.distributions().map(Name::name),
+            site_packages_discovery(),
         )?,
         Some(site_packages) => site_packages,
     };
@@ -685,9 +689,12 @@ pub async fn pip_install(
 
     // Notify the user of any environment diagnostics.
     if strict && !dry_run.enabled() {
-        uv_install_operations::diagnose_environment(
+        uv_install_operations::diagnose_site_packages(
             resolution.distributions().map(Name::name),
-            &environment,
+            &SitePackages::from_environment_with_discovery(
+                &environment,
+                site_packages_discovery(),
+            )?,
             &marker_env,
             &tags,
             &dependency_metadata,

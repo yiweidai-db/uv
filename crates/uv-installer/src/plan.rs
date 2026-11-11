@@ -47,6 +47,11 @@ pub enum PlanError {
     DistributionTypes(#[from] Error),
     #[error(transparent)]
     Distribution(#[from] uv_distribution::Error),
+    #[error(
+        "Cannot install `{name}` because the read-only installation at `{}` precedes the environment on `sys.path`",
+        path.user_display()
+    )]
+    Unshadowable { name: PackageName, path: PathBuf },
 }
 
 impl uv_errors::Hinted for PlanError {
@@ -58,7 +63,8 @@ impl uv_errors::Hinted for PlanError {
             | Self::NoBinaryUrl(_)
             | Self::NoBinaryPath(_)
             | Self::NoBinaryGitPath(_)
-            | Self::DistributionTypes(_) => uv_errors::Hints::none(),
+            | Self::DistributionTypes(_)
+            | Self::Unshadowable { .. } => uv_errors::Hints::none(),
         }
     }
 }
@@ -357,10 +363,16 @@ impl<'a> Planner<'a> {
             let no_binary = build_options.no_binary_package(dist.name());
             let no_build = build_options.no_build_package(dist.name());
 
-            // Determine whether the distribution is already installed.
-            let installed_dists = site_packages.remove_packages(dist.name());
+            // Determine whether the distribution is already installed. A read-only copy can
+            // satisfy the requirement, but only the environment's copies are replaced.
+            let installed_dists = site_packages
+                .get_packages(dist.name())
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let owned_dists = site_packages.remove_packages(dist.name());
             if reinstall {
-                reinstalls.extend(installed_dists);
+                reinstalls.extend(owned_dists);
             } else {
                 match installed_dists.as_slice() {
                     [] => {}
@@ -416,13 +428,21 @@ impl<'a> Planner<'a> {
                                 // Already logged
                             }
                         }
-                        reinstalls.push(installed.clone());
+                        reinstalls.extend(owned_dists);
                     }
                     // We reinstall installed distributions with multiple versions because
                     // we do not want to keep multiple incompatible versions but removing
                     // one version is likely to break another.
-                    _ => reinstalls.extend(installed_dists),
+                    _ => reinstalls.extend(owned_dists),
                 }
+            }
+
+            // A copy installed into the environment would be shadowed at runtime.
+            if let Some(path) = site_packages.unshadowable(dist.name()) {
+                return Err(PlanError::Unshadowable {
+                    name: dist.name().clone(),
+                    path: path.to_path_buf(),
+                });
             }
 
             let ResolvedDist::Installable { dist, .. } = dist else {
@@ -788,7 +808,7 @@ impl<'a> Planner<'a> {
             // Retain seed packages unless: (1) the virtual environment was created by uv and
             // (2) the `--seed` argument was not passed to `uv venv`.
             let seed_packages = !venv.cfg().is_ok_and(|cfg| cfg.is_uv() && !cfg.is_seed());
-            for dist_info in site_packages {
+            for dist_info in site_packages.into_mutable() {
                 if seed_packages && is_seed_package(&dist_info, venv) {
                     debug!("Preserving seed package: {dist_info}");
                     continue;

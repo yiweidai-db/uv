@@ -14,6 +14,7 @@ use uv_python_types::{
 };
 
 use crate::reporters::report_target_environment;
+use crate::site_packages_discovery;
 use uv_command_support::Printer;
 use uv_command_support::{ExitStatus, elapsed};
 use uv_resolve_operations::{resolution_markers, resolution_tags};
@@ -43,7 +44,8 @@ pub fn pip_check(
     report_target_environment(&environment, cache, printer)?;
 
     // Build the installed index.
-    let site_packages = SitePackages::from_environment(&environment)?;
+    let site_packages =
+        SitePackages::from_environment_with_discovery(&environment, site_packages_discovery())?;
     let packages: Vec<&InstalledDist> = site_packages.iter().collect();
 
     let s = if packages.len() == 1 { "" } else { "s" };

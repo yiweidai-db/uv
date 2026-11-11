@@ -19,6 +19,7 @@ use uv_python_types::{
 };
 
 use crate::reporters::report_target_environment;
+use crate::site_packages_discovery;
 use uv_command_support::ExitStatus;
 use uv_command_support::Printer;
 
@@ -77,7 +78,8 @@ pub fn pip_show(
     report_target_environment(&environment, cache, printer)?;
 
     // Build the installed index.
-    let site_packages = SitePackages::from_environment(&environment)?;
+    let site_packages =
+        SitePackages::from_environment_with_discovery(&environment, site_packages_discovery())?;
 
     // Determine the markers used to evaluate dependencies.
     let markers = environment.interpreter().to_resolver_marker_environment();

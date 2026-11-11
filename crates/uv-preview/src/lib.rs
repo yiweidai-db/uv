@@ -462,6 +462,12 @@ pub enum PreviewFeature {
     BuildDependencyHashes,
     /// Enables experimental support for [wheel variants](https://peps.python.org/pep-0825/).
     WheelVariants,
+    /// `uv pip` commands discover installed packages on the interpreter's runtime `sys.path`,
+    /// including directories added by `.pth` files and `PYTHONPATH`. Packages outside the
+    /// environment's `site-packages` are read-only: they can satisfy requirements and are shadowed
+    /// when a different version is installed, but are never uninstalled. `uv pip sync` does not use
+    /// this discovery yet.
+    SysPathDiscovery,
 }
 
 impl Display for PreviewFeature {

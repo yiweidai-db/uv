@@ -933,3 +933,73 @@ fn list_prefix() -> Result<()> {
 
     Ok(())
 }
+
+/// With `sys-path-discovery`, packages that a `.pth` file adds to `sys.path` are listed, and
+/// `sys.path` is read again on every invocation.
+#[test]
+fn list_sys_path_discovery() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context
+        .temp_dir
+        .child("layer")
+        .child("inherited-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: inherited
+        Version: 1.0.0
+    "})?;
+    let pth = ChildPath::new(context.site_packages()).child("layer.pth");
+    pth.write_str(&context.temp_dir.child("layer").path().display().to_string())?;
+
+    uv_snapshot!(context.filters(), context.pip_list(), @"exit_code: 0 (success)");
+
+    uv_snapshot!(context.filters(), context.pip_list()
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stdout -----
+    Package   Version
+    --------- -------
+    inherited 1.0.0
+    ");
+
+    fs_err::remove_file(pth.path())?;
+
+    uv_snapshot!(context.filters(), context.pip_list()
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"exit_code: 0 (success)");
+
+    Ok(())
+}
+
+/// With `sys-path-discovery`, packages on `PYTHONPATH` are listed.
+#[test]
+fn list_sys_path_discovery_pythonpath() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context
+        .temp_dir
+        .child("layer")
+        .child("inherited-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: inherited
+        Version: 1.0.0
+    "})?;
+
+    uv_snapshot!(context.filters(), context.pip_list()
+        .arg("--preview-features")
+        .arg("sys-path-discovery")
+        .env(EnvVars::PYTHONPATH, context.temp_dir.child("layer").path()), @"
+    exit_code: 0 (success)
+    ----- stdout -----
+    Package   Version
+    --------- -------
+    inherited 1.0.0
+    ");
+
+    Ok(())
+}

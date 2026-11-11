@@ -18,6 +18,7 @@ use uv_python_types::{
 };
 
 use crate::reporters::report_target_environment;
+use crate::site_packages_discovery;
 use uv_command_support::ExitStatus;
 use uv_command_support::Printer;
 
@@ -79,7 +80,10 @@ pub fn pip_freeze(
                 .map(|environment| SitePackages::from_environment(&environment))
                 .collect::<Result<Vec<_>>>()?
         }
-        None => vec![SitePackages::from_environment(&environment)?],
+        None => vec![SitePackages::from_environment_with_discovery(
+            &environment,
+            site_packages_discovery(),
+        )?],
     };
 
     site_packages

@@ -19223,3 +19223,187 @@ fn compile_bytecode_excludes_stdlib() -> Result<()> {
 
     Ok(())
 }
+
+/// With `sys-path-discovery`, a package that a `.pth` file adds to `sys.path` satisfies a
+/// requirement without being installed into the environment.
+#[test]
+fn install_sys_path_discovery_satisfied() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context.temp_dir.child("layer").child("ok-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: ok
+        Version: 1.0.0
+    "})?;
+    fs::write(
+        context.site_packages().join("layer.pth"),
+        context.temp_dir.child("layer").path().display().to_string(),
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("ok")
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stderr -----
+    Checked 1 package in [TIME]
+    ");
+
+    Ok(())
+}
+
+/// With `sys-path-discovery`, installing another version shadows the read-only copy, and
+/// uninstalling removes only the environment's copy.
+#[test]
+fn install_sys_path_discovery_shadow() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context.temp_dir.child("layer").child("ok-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: ok
+        Version: 1.0.0
+    "})?;
+    fs::write(
+        context.site_packages().join("layer.pth"),
+        context.temp_dir.child("layer").path().display().to_string(),
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("ok==2.0.0")
+        .arg("--no-index")
+        .arg("--find-links")
+        .arg(context.workspace_root.join("test/links"))
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + ok==2.0.0
+    ");
+
+    uv_snapshot!(context.filters(), context.pip_list()
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stdout -----
+    Package Version
+    ------- -------
+    ok      2.0.0
+    ");
+
+    uv_snapshot!(context.filters(), context.pip_uninstall()
+        .arg("ok")
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stderr -----
+    Uninstalled 1 package in [TIME]
+     - ok==2.0.0
+    ");
+
+    uv_snapshot!(context.filters(), context.pip_list()
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stdout -----
+    Package Version
+    ------- -------
+    ok      1.0.0
+    ");
+
+    Ok(())
+}
+
+/// With `sys-path-discovery`, uv refuses to install a package whose read-only copy comes first on
+/// `sys.path`, since Python would not import the new copy.
+#[test]
+fn install_sys_path_discovery_unshadowable() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context.temp_dir.child("layer").child("ok-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: ok
+        Version: 1.0.0
+    "})?;
+    fs::write(
+        context.site_packages().join("layer.pth"),
+        format!(
+            "import sys; sys.path.insert(0, r\"{}\")",
+            context.temp_dir.child("layer").path().display()
+        ),
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("ok==2.0.0")
+        .arg("--no-index")
+        .arg("--find-links")
+        .arg(context.workspace_root.join("test/links"))
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 2 (failure)
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    error: Failed to determine installation plan
+      cause: Cannot install `ok` because the read-only installation at `layer/ok-1.0.0.dist-info` precedes the environment on `sys.path`
+    ");
+
+    Ok(())
+}
+
+/// With `sys-path-discovery`, `--exact` keeps packages outside the environment.
+#[test]
+fn install_sys_path_discovery_exact() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context
+        .temp_dir
+        .child("layer")
+        .child("inherited-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: inherited
+        Version: 1.0.0
+    "})?;
+    fs::write(
+        context.site_packages().join("layer.pth"),
+        context.temp_dir.child("layer").path().display().to_string(),
+    )?;
+
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg("--exact")
+        .arg("ok==2.0.0")
+        .arg("--no-index")
+        .arg("--find-links")
+        .arg(context.workspace_root.join("test/links"))
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stderr -----
+    Resolved 1 package in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + ok==2.0.0
+    ");
+
+    uv_snapshot!(context.filters(), context.pip_list()
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stdout -----
+    Package   Version
+    --------- -------
+    inherited 1.0.0
+    ok        2.0.0
+    ");
+
+    Ok(())
+}

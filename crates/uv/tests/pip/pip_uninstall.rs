@@ -377,6 +377,41 @@ fn uninstall_versionless_egg_info_file() -> Result<()> {
     Ok(())
 }
 
+/// With `sys-path-discovery`, a package outside the environment is reported as read-only and left
+/// in place.
+#[test]
+fn uninstall_sys_path_discovery_read_only() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let dist_info = context
+        .temp_dir
+        .child("layer")
+        .child("inherited-1.0.0.dist-info");
+    dist_info.create_dir_all()?;
+    dist_info.child("METADATA").write_str(indoc! {"
+        Metadata-Version: 2.1
+        Name: inherited
+        Version: 1.0.0
+    "})?;
+    ChildPath::new(context.site_packages())
+        .child("layer.pth")
+        .write_str(&context.temp_dir.child("layer").path().display().to_string())?;
+
+    uv_snapshot!(context.filters(), context.pip_uninstall()
+        .arg("inherited")
+        .arg("--preview-features")
+        .arg("sys-path-discovery"), @"
+    exit_code: 0 (success)
+    ----- stderr -----
+    warning: Skipping inherited as it is installed in a read-only location: [TEMP_DIR]/layer/inherited-1.0.0.dist-info
+    warning: No packages to uninstall
+    ");
+
+    assert!(dist_info.exists());
+
+    Ok(())
+}
+
 fn normcase(s: &str) -> String {
     if cfg!(windows) {
         s.replace('/', "\\").to_lowercase()
